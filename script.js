@@ -201,6 +201,11 @@ function unwrapApiPayload(payload) {
   return payload;
 }
 
+function unwrapApiEntity(payload, key) {
+  const data = unwrapApiPayload(payload) || {};
+  return data[key] || data;
+}
+
 function normalizeApiError(payload, fallback) {
   const code = payload?.message || payload?.error || payload?.code;
   const messages = {
@@ -241,7 +246,7 @@ function normalizeLoginUser(raw = {}, fallbackEmail = "") {
 }
 
 function normalizeSupplier(raw = {}) {
-  const supplier = unwrapApiPayload(raw) || {};
+  const supplier = unwrapApiEntity(raw, "supplier") || {};
   const plan = supplier.plan || {};
   return {
     ...supplierUser,
@@ -270,19 +275,20 @@ function normalizeSupplier(raw = {}) {
 }
 
 function normalizeProduct(raw = {}) {
+  const product = unwrapApiEntity(raw, "product") || {};
   return {
-    ...raw,
-    id: raw.id || raw._id || raw.productId,
-    supplierId: raw.supplierId || raw.supplier_id || supplierUser.id,
-    supplier: raw.supplier || raw.supplierName || supplierUser.name,
-    name: raw.name || raw.title || "",
-    category: raw.category || raw.categoryName || "Geral",
-    description: raw.description || raw.shortDescription || "",
-    price: Number(raw.price || raw.salePrice || 0),
-    stock: Number(raw.stock || raw.quantity || raw.availableQuantity || 0),
-    status: raw.status || (Number(raw.stock || 0) <= 0 ? "out_of_stock" : "active"),
-    startVisible: raw.startVisible ?? raw.visibleOnStart ?? true,
-    updatedAt: raw.updatedAt || raw.updated_at || new Date().toISOString()
+    ...product,
+    id: product.id || product._id || product.productId,
+    supplierId: product.supplierId || product.supplier_id || supplierUser.id,
+    supplier: product.supplier || product.supplierName || supplierUser.name,
+    name: product.name || product.title || "",
+    category: product.category || product.categoryName || "Geral",
+    description: product.description || product.shortDescription || "",
+    price: Number(product.price || product.salePrice || 0),
+    stock: Number(product.stock || product.quantity || product.availableQuantity || 0),
+    status: product.status || (Number(product.stock || 0) <= 0 ? "out_of_stock" : "active"),
+    startVisible: product.startVisible ?? product.visibleOnStart ?? true,
+    updatedAt: product.updatedAt || product.updated_at || new Date().toISOString()
   };
 }
 
@@ -293,7 +299,7 @@ function normalizeProducts(raw) {
 }
 
 function normalizeAdminSupplier(raw = {}) {
-  const supplier = unwrapApiPayload(raw) || {};
+  const supplier = unwrapApiEntity(raw, "supplier") || {};
   const user = supplier.user || supplier.account || {};
   const plan = supplier.plan || {};
   const monthlyPosts = Number(supplier.autobookPostQuota || supplier.monthlyPosts || plan.monthlyPosts || plan.limit || 0);
