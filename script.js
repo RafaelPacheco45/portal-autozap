@@ -639,12 +639,14 @@ function readonly(label, value) {
 
 function currentPlan() {
   const quotaPayload = unwrapApiPayload(supplierQuotas) || {};
+  const monthlyPosts = Number(quotaPayload.monthlyPosts || quotaPayload.total || quotaPayload.limit || supplierUser.plan.monthlyPosts || 0);
+  const usedPosts = Number(quotaPayload.usedPosts || quotaPayload.used || supplierUser.plan.usedPosts || 0);
   return {
     ...supplierUser.plan,
     ...quotaPayload,
     name: quotaPayload.name || quotaPayload.planName || supplierUser.plan.name,
-    monthlyPosts: Number(quotaPayload.monthlyPosts || quotaPayload.total || quotaPayload.limit || supplierUser.plan.monthlyPosts),
-    usedPosts: Number(quotaPayload.usedPosts || quotaPayload.used || supplierUser.plan.usedPosts)
+    monthlyPosts: Number.isFinite(monthlyPosts) ? monthlyPosts : 0,
+    usedPosts: Number.isFinite(usedPosts) ? usedPosts : 0
   };
 }
 
@@ -836,7 +838,7 @@ function renderAutoBook() {
   const used = plan.usedPosts + Math.max(0, supplierPosts.length - defaultSupplierPosts);
   const total = plan.monthlyPosts;
   const remaining = Math.max(0, total - used);
-  const percent = Math.min(100, Math.round((used / total) * 100));
+  const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
   const nextPost = supplierPosts.filter((post) => post.status === "scheduled").sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
 
   app.innerHTML = shell({
