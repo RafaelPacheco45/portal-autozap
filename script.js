@@ -178,7 +178,9 @@ function statusLabel(status) {
     review: "Em analise",
     rejected: "Rejeitada",
     pending: "Pendente",
-    needs_adjustment: "Precisa de ajuste"
+    needs_adjustment: "Precisa de ajuste",
+    start_visible: "Disponivel",
+    start_hidden: "Oculto"
   };
   return labels[status] || status;
 }
@@ -209,7 +211,7 @@ function normalizeApiError(payload, fallback) {
 }
 
 function isProtectedPath(path) {
-  return path.startsWith("/admin/") || path.startsWith("/supplier/") || path === "/app/bootstrap";
+  return path.startsWith("/admin/") || path.startsWith("/supplier/") || path.startsWith("/start/") || path === "/app/bootstrap";
 }
 
 function debugApi(path, url, status, hasToken) {
@@ -255,6 +257,7 @@ function normalizeSupplier(raw = {}) {
     paymentIdentity: supplier.paymentIdentity || supplier.paymentId || supplierUser.paymentIdentity,
     responsible: supplier.responsible || supplier.contactName || supplierUser.responsible,
     phone: supplier.phone || supplier.whatsapp || supplierUser.phone,
+    startVisible: supplier.startVisible ?? supplier.visibleOnStart ?? supplierUser.startVisible ?? true,
     plan: {
       ...supplierUser.plan,
       ...plan,
@@ -278,6 +281,7 @@ function normalizeProduct(raw = {}) {
     price: Number(raw.price || raw.salePrice || 0),
     stock: Number(raw.stock || raw.quantity || raw.availableQuantity || 0),
     status: raw.status || (Number(raw.stock || 0) <= 0 ? "out_of_stock" : "active"),
+    startVisible: raw.startVisible ?? raw.visibleOnStart ?? true,
     updatedAt: raw.updatedAt || raw.updated_at || new Date().toISOString()
   };
 }
@@ -309,7 +313,7 @@ function normalizeAdminSupplier(raw = {}) {
     pixKey: supplier.pixKey || supplier.pix || "",
     status: supplier.status || user.status || "pending",
     verified: Boolean(supplier.verified),
-    startVisible: Boolean(supplier.startVisible || supplier.visibleOnStart),
+    startVisible: supplier.startVisible ?? supplier.visibleOnStart ?? true,
     planName: supplier.planName || plan.name || "Fornecedor",
     monthlyPosts,
     usedPosts,
@@ -446,6 +450,103 @@ async function apiUpdateAdminSupplier(supplierId, data) {
     return updated;
   }
   return normalizeAdminSupplier(await apiRequest(`/admin/suppliers/${encodeURIComponent(supplierId)}`, { method: "PUT", body: data }));
+}
+
+function buildStartSupplierPayload(supplier = {}, source = "portal") {
+  const id = supplier.id || supplier._id || supplier.supplierId || "";
+  const companyName = supplier.companyName || supplier.name || supplier.tradeName || "";
+  const visible = supplier.startVisible !== false && !["blocked", "deleted", "archived"].includes(supplier.status);
+  return {
+    supplierId: id,
+    id,
+    name: companyName,
+    companyName,
+    tradeName: companyName,
+    contactName: supplier.contactName || supplier.responsible || supplier.contact || "",
+    responsible: supplier.contactName || supplier.responsible || supplier.contact || "",
+    email: supplier.email || "",
+    phone: supplier.phone || supplier.whatsapp || "",
+    whatsapp: supplier.phone || supplier.whatsapp || "",
+    city: supplier.city || "",
+    state: supplier.state || "",
+    cnpj: supplier.cnpj || supplier.document || "",
+    pixKey: supplier.pixKey || supplier.pix || "",
+    status: supplier.status || "pending",
+    verified: Boolean(supplier.verified),
+    startVisible: visible,
+    visibleOnStart: visible,
+    source,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function buildStartProductPayload(product = {}, supplier = supplierUser, source = "portal") {
+  const supplierId = product.supplierId || supplier.id || supplier.supplierId || "";
+  const stock = Number(product.stock || product.quantity || product.availableQuantity || 0);
+  const status = product.status || (stock <= 0 ? "out_of_stock" : "active");
+  const visible = product.startVisible !== false && status === "active" && stock > 0;
+  return {
+    productId: product.id || product._id || product.productId || "",
+    id: product.id || product._id || product.productId || "",
+    supplierId,
+    supplier: product.supplier || supplier.companyName || supplier.name || "",
+    supplierName: product.supplier || supplier.companyName || supplier.name || "",
+    name: product.name || product.title || "",
+    title: product.name || product.title || "",
+    category: product.category || product.categoryName || "Geral",
+    description: product.description || product.shortDescription || "",
+    shortDescription: product.description || product.shortDescription || "",
+    price: Number(product.price || product.salePrice || 0),
+    salePrice: Number(product.price || product.salePrice || 0),
+    stock,
+    quantity: stock,
+    availableQuantity: stock,
+    status,
+    startVisible: visible,
+    visibleOnStart: visible,
+    source,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function tryStartSync(endpoints, payload) {
+  if (USE_MOCK) return { ok: true, mock: true };
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    try {
+      await apiRequest(endpoint.path, { method: endpoint.method, body: payload });
+      return { ok: true, endpoint: endpoint.path };
+    } catch (error) {
+      lastError = error;
+      if (!/Rota nao encontrada|Falha na API \(405\)|Falha na API \(404\)/i.test(error.message || "")) break;
+    }
+  }
+  console.warn("[AutoZap Start sync]", lastError);
+  return { ok: false, error: lastError?.message || "Sincronizacao com AutoZap Start pendente." };
+}
+
+async function syncSupplierToStart(supplier, source = "portal") {
+  const payload = buildStartSupplierPayload(supplier, source);
+  const supplierId = encodeURIComponent(payload.supplierId || "");
+  const endpoints = [
+    ...(payload.supplierId ? [{ method: "PUT", path: `/start/suppliers/${supplierId}` }] : []),
+    { method: "POST", path: "/start/suppliers" },
+    { method: "POST", path: "/start/suppliers/sync" }
+  ];
+  return tryStartSync(endpoints, payload);
+}
+
+async function syncProductToStart(product, supplier = supplierUser, source = "portal") {
+  const payload = buildStartProductPayload(product, supplier, source);
+  const supplierId = encodeURIComponent(payload.supplierId || "");
+  const productId = encodeURIComponent(payload.productId || "");
+  const endpoints = [
+    ...(supplierId && productId ? [{ method: "PUT", path: `/start/suppliers/${supplierId}/products/${productId}` }] : []),
+    ...(supplierId ? [{ method: "POST", path: `/start/suppliers/${supplierId}/products` }] : []),
+    { method: "POST", path: "/start/products" },
+    { method: "POST", path: "/start/supplier-products" }
+  ];
+  return tryStartSync(endpoints, payload);
 }
 
 async function apiResetAdminSupplierPassword(supplierId, newPassword) {
@@ -882,6 +983,15 @@ function renderAutoZapStart() {
           ${statCard("Estoque total", `${totalStock} un.`, "Somando itens ativos e pausados")}
           ${statCard("Ultima sincronizacao", latestDate(supplierProducts), USE_MOCK ? "LocalStorage mock" : "Core Server V1")}
         </section>
+        <section class="panel sync-panel">
+          <div class="section-heading inline">
+            <div class="card-icon small">${icon("spark")}</div>
+            <div>
+              <h2>Envio para o AutoZap Start</h2>
+              <p>Produtos ativos, com estoque e marcados como disponiveis para o Start podem aparecer para novos lojistas montarem o primeiro pedido. Dados de Pix e pagamento continuam protegidos e sao usados apenas no fechamento direto com o fornecedor.</p>
+            </div>
+          </div>
+        </section>
         <section class="panel table-panel">
           <div class="toolbar">
             <div><h2>Catalogo comercial</h2><p>Atualize informacoes comerciais sem alterar dados fiscais ou de pagamento.</p></div>
@@ -934,7 +1044,7 @@ function productsTable(rows, adminMode) {
     <div class="table-scroll">
       <table class="responsive-table">
         <thead>
-          <tr>${adminMode ? "<th>Fornecedor</th>" : ""}<th>Produto</th><th>Categoria</th><th>Preco</th><th>Estoque</th><th>Status</th><th>Ultima atualizacao</th><th>Acoes</th></tr>
+          <tr>${adminMode ? "<th>Fornecedor</th>" : ""}<th>Produto</th><th>Categoria</th><th>Preco</th><th>Estoque</th><th>Status</th><th>Start</th><th>Ultima atualizacao</th><th>Acoes</th></tr>
         </thead>
         <tbody>
           ${rows.map((product) => `
@@ -945,6 +1055,7 @@ function productsTable(rows, adminMode) {
               <td data-label="Preco">${formatCurrency(product.price)}</td>
               <td data-label="Estoque">${Number(product.stock || 0)} un.</td>
               <td data-label="Status">${badge(product.status)}</td>
+              <td data-label="Start">${badge(product.startVisible !== false && product.status === "active" && Number(product.stock || 0) > 0 ? "start_visible" : "start_hidden")}</td>
               <td data-label="Ultima atualizacao">${formatDateTime(product.updatedAt)}</td>
               <td data-label="Acoes" class="actions">
                 <button class="btn tiny ghost" data-edit-product="${product.id}">Editar</button>
@@ -962,8 +1073,10 @@ function productsTable(rows, adminMode) {
 
 async function updateProduct(productId, payload) {
   const updated = await apiUpdateSupplierProduct(productId, payload);
-  products = products.map((item) => item.id === productId ? { ...item, ...payload, ...updated, updatedAt: updated.updatedAt || new Date().toISOString() } : item);
+  const merged = { ...products.find((item) => item.id === productId), ...payload, ...updated, updatedAt: updated.updatedAt || new Date().toISOString() };
+  products = products.map((item) => item.id === productId ? merged : item);
   if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
+  return merged;
 }
 
 function openProductModal(product = null) {
@@ -978,6 +1091,7 @@ function openProductModal(product = null) {
         <label>Preco<input name="price" type="number" min="0" step="0.01" value="${escapeHTML(product?.price || "")}" required /></label>
         <label>Quantidade disponivel<input name="stock" type="number" min="0" step="1" value="${escapeHTML(product?.stock ?? "")}" required /></label>
         <label>Status<select name="status"><option value="active" ${product?.status === "active" ? "selected" : ""}>Ativo</option><option value="paused" ${product?.status === "paused" ? "selected" : ""}>Pausado</option><option value="out_of_stock" ${product?.status === "out_of_stock" ? "selected" : ""}>Sem estoque</option></select></label>
+        <label>Disponivel no AutoZap Start<select name="startVisible"><option value="true" ${product?.startVisible !== false ? "selected" : ""}>Sim</option><option value="false" ${product?.startVisible === false ? "selected" : ""}>Nao</option></select></label>
       </div>
       <label>Descricao curta<textarea name="description" required>${escapeHTML(product?.description || "")}</textarea></label>
       <div class="modal-actions">
@@ -1000,21 +1114,25 @@ function openProductModal(product = null) {
       description: data.description.trim(),
       price: Number(data.price),
       stock: Number(data.stock),
-      status: data.status
+      status: data.status,
+      startVisible: data.startVisible === "true"
     };
 
     try {
+      let savedProduct;
       if (isEdit) {
-        await updateProduct(product.id, payload);
+        savedProduct = await updateProduct(product.id, payload);
       } else {
         const created = await apiCreateSupplierProduct(payload);
-        products = [{ id: created.id || `p${Date.now()}`, ...payload, ...created, updatedAt: created.updatedAt || new Date().toISOString() }, ...products];
+        savedProduct = { id: created.id || `p${Date.now()}`, ...payload, ...created, updatedAt: created.updatedAt || new Date().toISOString() };
+        products = [savedProduct, ...products];
         if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
       }
+      const sync = await syncProductToStart(savedProduct, supplierUser, isEdit ? "supplier-product-update" : "supplier-product-create");
 
       closeModal();
       route();
-      showToast(isEdit ? "Produto atualizado com sucesso." : "Produto criado no catalogo.");
+      showToast(sync.ok ? (isEdit ? "Produto atualizado e enviado ao Start." : "Produto criado e enviado ao Start.") : "Produto salvo. Sincronizacao com Start pendente.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel salvar o produto.", "error");
     }
@@ -1027,8 +1145,10 @@ async function duplicateProduct(productId) {
   try {
     const { id, updatedAt, ...copyPayload } = product;
     const created = await apiCreateSupplierProduct({ ...copyPayload, name: `${product.name} - copia`, status: "paused" });
-    products = [{ ...product, ...created, id: created.id || `p${Date.now()}`, name: `${product.name} - copia`, status: "paused", updatedAt: created.updatedAt || new Date().toISOString() }, ...products];
+    const savedProduct = { ...product, ...created, id: created.id || `p${Date.now()}`, name: `${product.name} - copia`, status: "paused", startVisible: false, updatedAt: created.updatedAt || new Date().toISOString() };
+    products = [savedProduct, ...products];
     if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
+    await syncProductToStart(savedProduct, supplierUser, "supplier-product-duplicate");
     route();
     showToast("Produto duplicado como item pausado.");
   } catch (error) {
@@ -1123,7 +1243,7 @@ function suppliersTable() {
   return `
     <div class="table-scroll">
       <table class="responsive-table">
-        <thead><tr><th>Empresa</th><th>Login</th><th>Responsavel</th><th>Status</th><th>Produtos</th><th>Quota AutoBook</th><th>Acoes</th></tr></thead>
+        <thead><tr><th>Empresa</th><th>Login</th><th>Responsavel</th><th>Status</th><th>Start</th><th>Produtos</th><th>Quota AutoBook</th><th>Acoes</th></tr></thead>
         <tbody>
           ${suppliers.map((supplier) => `
             <tr>
@@ -1131,6 +1251,7 @@ function suppliersTable() {
               <td data-label="Login">${escapeHTML(supplier.email || "-")}</td>
               <td data-label="Responsavel">${escapeHTML(supplier.contactName || "-")}<small>${escapeHTML([supplier.phone, supplier.city, supplier.state].filter(Boolean).join(" - ") || "-")}</small></td>
               <td data-label="Status">${badge(supplier.status)}</td>
+              <td data-label="Start">${badge(supplier.startVisible !== false && supplier.status === "active" ? "start_visible" : "start_hidden")}</td>
               <td data-label="Produtos">${escapeHTML(supplier.activeProducts)}</td>
               <td data-label="Quota AutoBook">${escapeHTML(supplier.monthlyPosts || 0)}</td>
               <td data-label="Acoes" class="actions">
@@ -1247,7 +1368,7 @@ function supplierFormFields(supplier = {}, mode = "create") {
       <label>Status<select name="status"><option value="active" ${supplier.status === "active" ? "selected" : ""}>Ativo</option><option value="pending" ${supplier.status === "pending" ? "selected" : ""}>Pendente</option><option value="blocked" ${supplier.status === "blocked" ? "selected" : ""}>Bloqueado</option></select></label>
       <label>Verificado<select name="verified"><option value="true" ${supplier.verified ? "selected" : ""}>Sim</option><option value="false" ${!supplier.verified ? "selected" : ""}>Nao</option></select></label>
       <label>Quota mensal AutoBook<input name="autobookPostQuota" type="number" min="0" value="${escapeHTML(supplier.monthlyPosts || 0)}" /></label>
-      <label>Visivel no AutoZap Start<select name="startVisible"><option value="true" ${supplier.startVisible ? "selected" : ""}>Sim</option><option value="false" ${!supplier.startVisible ? "selected" : ""}>Nao</option></select></label>
+      <label>Visivel no AutoZap Start<select name="startVisible"><option value="true" ${supplier.startVisible !== false ? "selected" : ""}>Sim</option><option value="false" ${supplier.startVisible === false ? "selected" : ""}>Nao</option></select></label>
     </div>
   `;
 }
@@ -1322,12 +1443,13 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "createSupplierForm") {
     event.preventDefault();
     try {
-      await apiCreateAdminSupplier(readSupplierForm(event.target, true));
+      const created = await apiCreateAdminSupplier(readSupplierForm(event.target, true));
+      const sync = await syncSupplierToStart(created, "admin-supplier-create");
       event.target.reset();
       closeModal();
       await loadAdminData({ force: true });
       renderAdminDashboard();
-      showToast("Fornecedor criado com sucesso. Envie o email e a senha temporaria ao fornecedor por canal seguro.");
+      showToast(sync.ok ? "Fornecedor criado e sincronizado com o AutoZap Start." : "Fornecedor criado. Sincronizacao com Start pendente.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel criar o fornecedor.", "error");
     }
@@ -1335,11 +1457,12 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "supplierForm") {
     event.preventDefault();
     try {
-      await apiUpdateAdminSupplier(event.target.dataset.supplierId, readSupplierForm(event.target, false));
+      const updated = await apiUpdateAdminSupplier(event.target.dataset.supplierId, readSupplierForm(event.target, false));
+      const sync = await syncSupplierToStart(updated, "admin-supplier-update");
       closeModal();
       await loadAdminData({ force: true });
       renderAdminDashboard();
-      showToast("Fornecedor atualizado.");
+      showToast(sync.ok ? "Fornecedor atualizado e sincronizado com o Start." : "Fornecedor atualizado. Sincronizacao com Start pendente.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel atualizar o fornecedor.", "error");
     }
@@ -1456,20 +1579,23 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.toggleProduct) {
     const product = products.find((item) => item.id === target.dataset.toggleProduct);
     try {
-      await updateProduct(target.dataset.toggleProduct, { status: product?.status === "paused" ? "active" : "paused" });
+      const updated = await updateProduct(target.dataset.toggleProduct, { status: product?.status === "paused" ? "active" : "paused" });
+      await syncProductToStart(updated, supplierUser, "supplier-product-status");
       route();
-      showToast("Status do produto atualizado.");
+      showToast("Status do produto atualizado e enviado ao Start.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel atualizar o status.", "error");
     }
   }
   if (target.dataset.removeProduct) {
     try {
+      const product = products.find((item) => item.id === target.dataset.removeProduct);
       await apiDeleteSupplierProduct(target.dataset.removeProduct);
+      if (product) await syncProductToStart({ ...product, status: "paused", startVisible: false, stock: 0 }, supplierUser, "supplier-product-remove");
       products = products.filter((item) => item.id !== target.dataset.removeProduct);
       if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
       route();
-      showToast("Produto removido do catalogo.");
+      showToast("Produto removido do catalogo e ocultado no Start.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel remover o produto.", "error");
     }
@@ -1491,9 +1617,10 @@ document.addEventListener("click", async (event) => {
     const action = supplier?.status === "active" ? "block" : "activate";
     try {
       await apiSetAdminSupplierStatus(target.dataset.toggleSupplier, action);
+      await syncSupplierToStart({ ...supplier, status: action === "activate" ? "active" : "blocked" }, "admin-supplier-status");
       await loadAdminData({ force: true });
       renderAdminDashboard();
-      showToast(action === "activate" ? "Fornecedor ativado." : "Fornecedor bloqueado.");
+      showToast(action === "activate" ? "Fornecedor ativado e enviado ao Start." : "Fornecedor bloqueado e ocultado no Start.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel atualizar o status do fornecedor.", "error");
     }
@@ -1501,10 +1628,12 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.archiveSupplier) {
     if (!confirm("Tem certeza que deseja arquivar este fornecedor? Ele nao conseguira mais acessar o Portal.")) return;
     try {
+      const supplier = suppliers.find((item) => item.id === target.dataset.archiveSupplier);
       await apiArchiveAdminSupplier(target.dataset.archiveSupplier);
+      if (supplier) await syncSupplierToStart({ ...supplier, status: "deleted", startVisible: false }, "admin-supplier-archive");
       await loadAdminData({ force: true });
       renderAdminDashboard();
-      showToast("Fornecedor arquivado com sucesso.");
+      showToast("Fornecedor arquivado e ocultado no Start.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel arquivar o fornecedor.", "error");
     }
