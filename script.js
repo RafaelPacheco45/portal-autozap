@@ -502,6 +502,7 @@ function buildStartProductPayload(product = {}, supplier = supplierUser, source 
     category: product.category || product.categoryName || "Geral",
     description: product.description || product.shortDescription || "",
     shortDescription: product.description || product.shortDescription || "",
+    imageUrl: product.imageUrl || "",
     price: Number(product.price || product.salePrice || 0),
     salePrice: Number(product.price || product.salePrice || 0),
     stock,
@@ -710,7 +711,7 @@ function protect(routeName) {
     showToast("Seu usuario nao tem permissao administrativa.", "error");
     return false;
   }
-  if (user?.role === "admin" && ["select", "autobook", "start"].includes(routeName)) {
+  if (user?.role === "admin" && ["select", "autobook", "start", "orders"].includes(routeName)) {
     navigate("#/admin");
     return false;
   }
@@ -721,7 +722,7 @@ async function route() {
   const routeName = (location.hash.replace("#/", "") || "login").split("?")[0];
   if (!protect(routeName)) return;
   if (routeName === "login") return renderLogin();
-  if (["select", "autobook", "start"].includes(routeName)) {
+  if (["select", "autobook", "start", "orders"].includes(routeName)) {
     try {
       await loadSupplierData();
     } catch (error) {
@@ -732,6 +733,7 @@ async function route() {
   if (routeName === "select") return renderSupplierDashboard();
   if (routeName === "autobook") return renderAutoBook();
   if (routeName === "start") return renderAutoZapStart();
+  if (routeName === "orders") return renderSupplierOrders();
   if (routeName === "admin") {
     renderAdminDashboard();
     try {
@@ -812,6 +814,7 @@ function renderSupplierDashboard() {
                   ${miniMetric("Status da operacao", "Sincronizada")}
                 </div>
                 <button class="btn primary" data-route="#/start">Gerenciar estoque</button>
+                <button class="btn outline" data-route="#/orders">Pedidos e recebimentos Pix</button>
               </article>
               <article class="area-card">
                 <div class="card-top">
@@ -834,6 +837,20 @@ function renderSupplierDashboard() {
       })}
     </main>
   `;
+}
+
+let supplierOrdersModule;
+async function renderSupplierOrders() {
+  app.innerHTML = shell({ title: "Pedidos e recebimentos", subtitle: "AutoZap Start", back: true, content: '<main class="content-grid"><div id="supplierOrdersRoot" aria-live="polite">Carregando pedidos e recebimentos…</div></main>' });
+  const host = document.getElementById("supplierOrdersRoot");
+  try {
+    if (!supplierOrdersModule) supplierOrdersModule = new Promise((resolve, reject) => {
+      const style = document.createElement("link"); style.rel = "stylesheet"; style.href = "supplier-orders.css"; document.head.append(style);
+      const script = document.createElement("script"); script.src = "supplier-orders.js"; script.onload = resolve; script.onerror = () => { supplierOrdersModule = null; script.remove(); reject(new Error("Não foi possível carregar esta página.")); }; document.head.append(script);
+    });
+    await supplierOrdersModule;
+    if (host.isConnected) await window.SupplierOrdersUI.mount(host, { request: apiRequest });
+  } catch (error) { if (host.isConnected) host.textContent = error.message; }
 }
 
 // AUTOBOOK
@@ -1101,6 +1118,7 @@ function openProductModal(product = null) {
         <label>Status<select name="status"><option value="active" ${product?.status === "active" ? "selected" : ""}>Ativo</option><option value="paused" ${product?.status === "paused" ? "selected" : ""}>Pausado</option><option value="out_of_stock" ${product?.status === "out_of_stock" ? "selected" : ""}>Sem estoque</option></select></label>
         <label>Disponivel no AutoZap Start<select name="startVisible"><option value="true" ${product?.startVisible !== false ? "selected" : ""}>Sim</option><option value="false" ${product?.startVisible === false ? "selected" : ""}>Nao</option></select></label>
       </div>
+      <label>Foto do produto (link HTTPS)<input name="imageUrl" type="url" placeholder="https://.../foto.jpg" value="${escapeHTML(product?.imageUrl || "")}" /><small>Use uma foto pública do produto. Ela aparece na vitrine do AutoZap Start.</small></label>
       <label>Descricao curta<textarea name="description" required>${escapeHTML(product?.description || "")}</textarea></label>
       <div class="modal-actions">
         <button type="button" class="btn ghost" data-action="closeModal">Cancelar</button>
@@ -1112,6 +1130,10 @@ function openProductModal(product = null) {
   document.querySelector("#productForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
+    if (data.imageUrl) {
+      try { const url = new URL(data.imageUrl); if (url.protocol !== "https:" || url.username || url.password) throw new Error(); }
+      catch { return showToast("Informe um link HTTPS válido para a foto.", "error"); }
+    }
     if (Number(data.price) < 0 || Number(data.stock) < 0) return showToast("Preco e estoque precisam ser valores validos.", "error");
 
     const payload = {
@@ -1120,6 +1142,7 @@ function openProductModal(product = null) {
       name: data.name.trim(),
       category: data.category.trim(),
       description: data.description.trim(),
+      imageUrl: data.imageUrl.trim(),
       price: Number(data.price),
       stock: Number(data.stock),
       status: data.status,
@@ -1498,18 +1521,7 @@ function closeModal() {
 }
 
 function createHelpRequest(type, description) {
-  const request = {
-    id: `h${Date.now()}`,
-    supplierId: supplierUser.id,
-    supplier: supplierUser.name,
-    type,
-    description,
-    date: new Date().toISOString().slice(0, 10),
-    status: "Aberta"
-  };
-  helpRequests = [request, ...helpRequests];
-  saveToStorage(STORAGE_HELP, helpRequests);
-  showToast("Solicitacao registrada para a equipe AutoZap.");
+  openModal(`<div class="modal"><h2>${escapeHTML(type)}</h2><p>Para registrar esta solicitação, abra um chamado no suporte AutoZap. O protocolo será emitido após o envio pelo suporte.</p><p>${escapeHTML(description)}</p><a class="btn primary" href="https://suporte.autozap.log.br/chamado" target="_blank" rel="noopener noreferrer">Abrir suporte AutoZap</a><button type="button" data-action="closeModal">Fechar</button></div>`);
 }
 
 // EVENTS
