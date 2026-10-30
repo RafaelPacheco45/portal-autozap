@@ -800,7 +800,7 @@ function renderSupplierDashboard() {
   const supplierPosts = posts.filter((post) => post.supplierId === supplierUser.id);
   const plan = currentPlan();
   const used = plan.usedPosts;
-  const remaining = Math.max(0, plan.monthlyPosts - used);
+  const remaining = plan.unlimited ? "Sem limite" : Math.max(0, plan.monthlyPosts - used);
   const nextPost = supplierPosts.filter((post) => post.status === "scheduled").sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
 
   app.innerHTML = `
@@ -874,7 +874,7 @@ function renderAutoBook() {
   const plan = currentPlan();
   const used = plan.usedPosts;
   const total = plan.monthlyPosts;
-  const remaining = Math.max(0, total - used);
+  const remaining = plan.unlimited ? "Sem limite" : Math.max(0, total - used);
   const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
   const nextPost = supplierPosts.filter((post) => post.status === "scheduled").sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
 
@@ -892,7 +892,7 @@ function renderAutoBook() {
           </header>
           <section class="stats-grid">
             ${statCard("Plano atual", plan.name, "Campanhas dentro do ciclo mensal")}
-            ${statCard("Postagens disponiveis", remaining, `${used}/${total} usadas`)}
+            ${statCard("Postagens disponiveis", remaining, plan.unlimited ? "Cota mensal desativada" : `${used}/${total} usadas`)}
             ${statCard("Postagens usadas", used, "Inclui envios em analise")}
             ${statCard("Proxima publicacao", nextPost ? formatDateTime(nextPost.scheduledAt) : "Sem agenda", "Agenda AutoBook")}
           </section>
@@ -917,7 +917,7 @@ function renderAutoBook() {
               </div>
               <label>Descricao curta<textarea name="description" placeholder="Resumo comercial que deve aparecer na campanha." required></textarea></label>
               <label>Observacoes para a equipe AutoZap<textarea name="notes" placeholder="Informe publico, promocao, produtos, restricoes ou referencias visuais."></textarea></label>
-              <div class="progress-wrap"><span>${used}/${total} publicacoes usadas no plano</span><div class="progress"><i style="width:${percent}%"></i></div></div>
+              <div class="progress-wrap"><span>${plan.unlimited ? `${used} envios neste mes. Anuncios sem limite de quantidade.` : `${used}/${total} publicacoes usadas no plano`}</span><div class="progress"><i style="width:${plan.unlimited ? 0 : percent}%"></i></div></div>
               <p>A data e uma preferencia para a equipe; nao ha agendamento automatico.</p>
               <button class="btn primary full" type="submit">Enviar para analise</button>
             </form>
@@ -970,7 +970,7 @@ async function createCampaign(form) {
   if (!form.campaign.value.trim()) return showToast("Informe o titulo da campanha.", "error");
   if (!form.desiredDate.value || !form.desiredTime.value) return showToast("Escolha data e horario desejados.", "error");
   const plan = currentPlan();
-  if (plan.usedPosts >= plan.monthlyPosts) return showToast("Limite mensal de campanhas atingido. Consulte a equipe AutoZap.", "error");
+  if (!plan.unlimited && plan.usedPosts >= plan.monthlyPosts) return showToast("Limite mensal de campanhas atingido. Consulte a equipe AutoZap.", "error");
   const mediaType = file.type === "video/mp4" ? "video" : ["image/png", "image/jpeg"].includes(file.type) ? "image" : "";
   if (!mediaType || file.size > (mediaType === "image" ? 8 : 50) * 1024 * 1024) return showToast("Envie PNG/JPG ate 8 MB ou MP4 ate 50 MB.", "error");
 
