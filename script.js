@@ -209,6 +209,8 @@ function unwrapApiEntity(payload, key) {
 function normalizeApiError(payload, fallback) {
   const code = payload?.message || payload?.error || payload?.code;
   const messages = {
+    supplier_not_approved: "Fornecedor ainda não aprovado. Fale com a equipe AutoZap.",
+    campaign_monthly_quota_exceeded: "Sua cota mensal de campanhas está esgotada ou ainda não foi configurada.",
     invalid_login: "E-mail ou senha invalidos. Confira os dados e tente novamente.",
     cors_origin_denied: "Origem bloqueada pela API. Abra o portal pelo servidor local ou libere o dominio no backend."
   };
@@ -267,8 +269,8 @@ function normalizeSupplier(raw = {}) {
       ...supplierUser.plan,
       ...plan,
       name: plan.name || supplier.planName || supplierUser.plan.name,
-      monthlyPosts: Number(plan.monthlyPosts || supplier.monthlyPosts || supplierUser.plan.monthlyPosts),
-      usedPosts: Number(plan.usedPosts || supplier.usedPosts || supplierUser.plan.usedPosts)
+      monthlyPosts: Number(plan.monthlyPosts ?? supplier.monthlyPosts ?? supplierUser.plan.monthlyPosts),
+      usedPosts: Number(plan.usedPosts ?? supplier.usedPosts ?? supplierUser.plan.usedPosts)
     },
     status: supplier.status || supplierUser.status
   };
@@ -368,7 +370,7 @@ async function apiRequest(path, options = {}) {
     navigate("#/login");
     throw new Error("Sessao expirada ou invalida. Entre novamente.");
   }
-  if (response.status === 403) throw new Error("Seu usuario nao tem permissao administrativa.");
+  if (response.status === 403) throw new Error(normalizeApiError(payload, "Sua conta não tem permissão para esta operação."));
   if (response.status === 404) throw new Error("Rota nao encontrada na API.");
   if (response.status >= 500) throw new Error("Erro interno no servidor.");
   if (!response.ok) {
@@ -405,17 +407,22 @@ async function apiGetSupplierProducts() {
 
 async function apiCreateSupplierProduct(product) {
   if (USE_MOCK) return { id: `p${Date.now()}`, ...product, updatedAt: new Date().toISOString() };
-  return normalizeProduct(await apiRequest("/supplier/products", { method: "POST", body: product }));
+  const query = session()?.role === "admin" && product.supplierId ? `?supplierId=${encodeURIComponent(product.supplierId)}` : "";
+  return normalizeProduct(await apiRequest(`/supplier/products${query}`, { method: "POST", body: product }));
 }
 
 async function apiUpdateSupplierProduct(productId, product) {
   if (USE_MOCK) return { id: productId, ...product, updatedAt: new Date().toISOString() };
-  return normalizeProduct(await apiRequest(`/supplier/products/${encodeURIComponent(productId)}`, { method: "PUT", body: product }));
+  const owner = product.supplierId || products.find(item => item.id === productId)?.supplierId;
+  const query = session()?.role === "admin" && owner ? `?supplierId=${encodeURIComponent(owner)}` : "";
+  return normalizeProduct(await apiRequest(`/supplier/products/${encodeURIComponent(productId)}${query}`, { method: "PUT", body: product }));
 }
 
 async function apiDeleteSupplierProduct(productId) {
   if (USE_MOCK) return { deleted: true };
-  return apiRequest(`/supplier/products/${encodeURIComponent(productId)}`, { method: "DELETE" });
+  const owner = products.find(item => item.id === productId)?.supplierId;
+  const query = session()?.role === "admin" && owner ? `?supplierId=${encodeURIComponent(owner)}` : "";
+  return apiRequest(`/supplier/products/${encodeURIComponent(productId)}${query}`, { method: "DELETE" });
 }
 
 async function apiGetSupplierQuotas() {
@@ -430,7 +437,9 @@ async function apiGetSupplierQuotas() {
 
 async function apiCreateSupplierAutoBookPost(post) {
   if (USE_MOCK) return { id: `post-${Date.now()}`, ...post, status: "review" };
-  return apiRequest("/supplier/autobook/posts", { method: "POST", body: post });
+  const result = await apiRequest("/supplier/campaigns", { method: "POST", body: post });
+  supplierQuotas = { quotas: result.quotas };
+  return result.post;
 }
 
 async function apiGetAdminSuppliers() {
@@ -590,6 +599,11 @@ async function loadAdminData({ force = false } = {}) {
   try {
     suppliers = await apiGetAdminSuppliers();
     suppliers = suppliers.filter((supplier) => supplier.status !== "deleted");
+    if (!USE_MOCK) {
+      const [campaigns, catalog] = await Promise.all([apiRequest("/admin/supplier-campaigns"), apiRequest("/admin/supplier-catalog")]);
+      posts = campaigns.posts || [];
+      products = normalizeProducts(catalog);
+    }
     adminDataLoaded = true;
   } catch (error) {
     adminError = error.message || "Nao foi possivel carregar fornecedores.";
@@ -601,15 +615,16 @@ async function loadAdminData({ force = false } = {}) {
 
 async function loadSupplierData({ force = false } = {}) {
   if (USE_MOCK || supplierDataLoaded && !force) return;
-  const [profile, productRows, quotaData] = await Promise.all([
+  const [profile, productRows, campaignData] = await Promise.all([
     apiGetSupplierMe(),
     apiGetSupplierProducts(),
-    apiGetSupplierQuotas().catch(() => null)
+    apiRequest("/supplier/campaigns")
   ]);
   Object.assign(supplierUser, profile);
   if (profile.plan) supplierUser.plan = profile.plan;
   products = productRows;
-  supplierQuotas = quotaData;
+  supplierQuotas = { quotas: campaignData.quotas };
+  posts = campaignData.posts || [];
   supplierDataLoaded = true;
 }
 
@@ -645,9 +660,9 @@ function readonly(label, value) {
 }
 
 function currentPlan() {
-  const quotaPayload = unwrapApiPayload(supplierQuotas) || {};
-  const monthlyPosts = Number(quotaPayload.monthlyPosts || quotaPayload.total || quotaPayload.limit || supplierUser.plan.monthlyPosts || 0);
-  const usedPosts = Number(quotaPayload.usedPosts || quotaPayload.used || supplierUser.plan.usedPosts || 0);
+  const quotaPayload = unwrapApiEntity(supplierQuotas, "quotas") || {};
+  const monthlyPosts = Number(quotaPayload.monthlyPosts ?? quotaPayload.maxAutobookPostsMonth ?? quotaPayload.total ?? quotaPayload.limit ?? supplierUser.plan.monthlyPosts ?? 0);
+  const usedPosts = Number(quotaPayload.usedPosts ?? quotaPayload.used ?? supplierUser.plan.usedPosts ?? 0);
   return {
     ...supplierUser.plan,
     ...quotaPayload,
@@ -784,7 +799,7 @@ function renderSupplierDashboard() {
   const stockItems = products.filter((product) => product.supplierId === supplierUser.id).reduce((sum, product) => sum + Number(product.stock || 0), 0);
   const supplierPosts = posts.filter((post) => post.supplierId === supplierUser.id);
   const plan = currentPlan();
-  const used = plan.usedPosts + Math.max(0, supplierPosts.length - defaultPosts.filter((post) => post.supplierId === supplierUser.id).length);
+  const used = plan.usedPosts;
   const remaining = Math.max(0, plan.monthlyPosts - used);
   const nextPost = supplierPosts.filter((post) => post.status === "scheduled").sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
 
@@ -856,9 +871,8 @@ async function renderSupplierOrders() {
 // AUTOBOOK
 function renderAutoBook() {
   const supplierPosts = posts.filter((post) => post.supplierId === supplierUser.id);
-  const defaultSupplierPosts = defaultPosts.filter((post) => post.supplierId === supplierUser.id).length;
   const plan = currentPlan();
-  const used = plan.usedPosts + Math.max(0, supplierPosts.length - defaultSupplierPosts);
+  const used = plan.usedPosts;
   const total = plan.monthlyPosts;
   const remaining = Math.max(0, total - used);
   const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
@@ -891,8 +905,8 @@ function renderAutoBook() {
               <label class="dropzone" for="postFile">
                 ${icon("upload")}
                 <strong>Upload de arquivo/design</strong>
-                <span>PNG, JPG, MP4 ou PDF ate 50 MB</span>
-                <input id="postFile" name="file" type="file" accept="image/*,video/mp4,application/pdf" />
+                <span>PNG/JPG ate 8 MB ou MP4 ate 50 MB. Publicacao somente apos revisao.</span>
+                <input id="postFile" name="file" type="file" accept="image/png,image/jpeg,video/mp4" />
                 <em id="fileName">Nenhum arquivo selecionado</em>
               </label>
               <div class="form-grid">
@@ -904,6 +918,7 @@ function renderAutoBook() {
               <label>Descricao curta<textarea name="description" placeholder="Resumo comercial que deve aparecer na campanha." required></textarea></label>
               <label>Observacoes para a equipe AutoZap<textarea name="notes" placeholder="Informe publico, promocao, produtos, restricoes ou referencias visuais."></textarea></label>
               <div class="progress-wrap"><span>${used}/${total} publicacoes usadas no plano</span><div class="progress"><i style="width:${percent}%"></i></div></div>
+              <p>A data e uma preferencia para a equipe; nao ha agendamento automatico.</p>
               <button class="btn primary full" type="submit">Enviar para analise</button>
             </form>
           </article>
@@ -936,10 +951,10 @@ function postsTable(rows) {
             <tr>
               <td data-label="Campanha"><strong>${escapeHTML(post.campaign || post.fileName)}</strong><small>${escapeHTML(post.fileName)}</small></td>
               <td data-label="Tipo">${escapeHTML(post.type || "Imagem")}</td>
-              <td data-label="Data desejada">${formatDate(post.desiredDate)} ${escapeHTML(post.desiredTime || "")}</td>
+              <td data-label="Data desejada">${post.desiredAt ? formatDateTime(post.desiredAt) : formatDate(post.desiredDate) + " " + escapeHTML(post.desiredTime || "")}</td>
               <td data-label="Status">${badge(post.status)}</td>
               <td data-label="Plano">${escapeHTML(post.plan || supplierUser.plan.name)}</td>
-              <td data-label="Acoes" class="actions"><button class="btn tiny ghost" data-post-status="${post.id}">Marcar publicada</button></td>
+              <td data-label="Acoes" class="actions">${escapeHTML(post.status === "published" ? "Publicada pela equipe" : "Aguardando equipe")}</td>
             </tr>
           `).join("")}
         </tbody>
@@ -949,10 +964,15 @@ function postsTable(rows) {
 }
 
 async function createCampaign(form) {
+  if (form.dataset.submitting === "true") return;
   const file = form.file.files[0];
   if (!file) return showToast("Selecione um arquivo para enviar a campanha.", "error");
   if (!form.campaign.value.trim()) return showToast("Informe o titulo da campanha.", "error");
   if (!form.desiredDate.value || !form.desiredTime.value) return showToast("Escolha data e horario desejados.", "error");
+  const plan = currentPlan();
+  if (plan.usedPosts >= plan.monthlyPosts) return showToast("Limite mensal de campanhas atingido. Consulte a equipe AutoZap.", "error");
+  const mediaType = file.type === "video/mp4" ? "video" : ["image/png", "image/jpeg"].includes(file.type) ? "image" : "";
+  if (!mediaType || file.size > (mediaType === "image" ? 8 : 50) * 1024 * 1024) return showToast("Envie PNG/JPG ate 8 MB ou MP4 ate 50 MB.", "error");
 
   const desiredDate = form.desiredDate.value;
   const desiredTime = form.desiredTime.value;
@@ -971,7 +991,23 @@ async function createCampaign(form) {
     notes: form.notes.value.trim()
   };
 
+  const button = form.querySelector('[type="submit"]');
+  form.dataset.submitting = "true";
+  button.disabled = true;
   try {
+    const identity = `${file.name}:${file.size}:${file.lastModified}`;
+    if (!form.uploadedMedia || form.uploadedMedia.identity !== identity) {
+      const upload = new FormData();
+      upload.append("file", file);
+      upload.append("mediaType", mediaType);
+      const media = await apiRequest("/api/autobook/media/upload", { method: "POST", body: upload });
+      if (!media.id) throw new Error("O envio do arquivo nao foi confirmado.");
+      form.uploadedMedia = { identity, id: media.id };
+    }
+    const submission = { title: payload.campaign, content: payload.description, mediaId: form.uploadedMedia.id, fileName: file.name, notes: payload.notes, desiredAt: new Date(`${desiredDate}T${desiredTime}`).toISOString() };
+    const signature = JSON.stringify(submission);
+    if (form.submissionSignature !== signature) { form.submissionSignature = signature; form.submissionKey = crypto.randomUUID(); }
+    Object.assign(payload, submission, { idempotencyKey: form.submissionKey });
     const created = await apiCreateSupplierAutoBookPost(payload);
     posts = [{ id: created.id || `post-${Date.now()}`, ...payload, ...created }, ...posts];
     if (USE_MOCK) saveToStorage(STORAGE_POSTS, posts);
@@ -979,6 +1015,9 @@ async function createCampaign(form) {
     showToast("Campanha enviada para analise da equipe AutoZap.");
   } catch (error) {
     showToast(error.message || "Envio de campanha indisponivel no servidor.", "error");
+  } finally {
+    form.dataset.submitting = "false";
+    button.disabled = false;
   }
 }
 
@@ -1159,11 +1198,10 @@ function openProductModal(product = null) {
         products = [savedProduct, ...products];
         if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
       }
-      const sync = await syncProductToStart(savedProduct, supplierUser, isEdit ? "supplier-product-update" : "supplier-product-create");
 
       closeModal();
       route();
-      showToast(sync.ok ? (isEdit ? "Produto atualizado e enviado ao Start." : "Produto criado e enviado ao Start.") : "Produto salvo. Sincronizacao com Start pendente.");
+      showToast(isEdit ? "Produto atualizado no catalogo." : "Produto criado no catalogo.");
     } catch (error) {
       showToast(error.message || "Nao foi possivel salvar o produto.", "error");
     }
@@ -1175,11 +1213,10 @@ async function duplicateProduct(productId) {
   if (!product) return;
   try {
     const { id, updatedAt, ...copyPayload } = product;
-    const created = await apiCreateSupplierProduct({ ...copyPayload, name: `${product.name} - copia`, status: "paused" });
+    const created = await apiCreateSupplierProduct({ ...copyPayload, name: `${product.name} - copia`, status: "paused", active: false, startVisible: false });
     const savedProduct = { ...product, ...created, id: created.id || `p${Date.now()}`, name: `${product.name} - copia`, status: "paused", startVisible: false, updatedAt: created.updatedAt || new Date().toISOString() };
     products = [savedProduct, ...products];
     if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
-    await syncProductToStart(savedProduct, supplierUser, "supplier-product-duplicate");
     route();
     showToast("Produto duplicado como item pausado.");
   } catch (error) {
@@ -1221,9 +1258,9 @@ function adminTabButton(tab, label) {
 function renderAdminTabContent() {
   if (adminTab === "overview") return renderAdminOverview();
   if (adminTab === "suppliers") return renderAdminSuppliersTab();
-  if (adminTab === "autobook") return USE_MOCK ? `<section class="panel table-panel"><h2>Campanhas AutoBook</h2>${adminPostsTable()}</section>` : adminUnavailablePanel("Campanhas AutoBook", "Conecte esta aba a uma rota real de campanhas administrativas antes de usar em producao.");
-  if (adminTab === "start") return USE_MOCK ? `<section class="panel table-panel"><h2>Estoque AutoZap Start</h2>${productsTable(products, true)}</section>` : adminUnavailablePanel("Estoque AutoZap Start", "Esta visao foi zerada em producao para nao exibir produtos simulados.");
-  if (adminTab === "requests") return USE_MOCK ? `<section class="panel table-panel"><h2>Solicitacoes abertas</h2>${helpTable()}</section>` : adminUnavailablePanel("Solicitacoes abertas", "Esta aba aguarda rota real de solicitacoes administrativas.");
+  if (adminTab === "autobook") return `<section class="panel table-panel"><h2>Campanhas AutoBook</h2>${adminPostsTable()}</section>`;
+  if (adminTab === "start") return `<section class="panel table-panel"><h2>Estoque AutoZap Start</h2>${productsTable(products, true)}</section>`;
+  if (adminTab === "requests") return `<section class="panel"><h2>Atendimento pelo suporte</h2><p>Os chamados sao registrados e acompanhados na central de suporte, nao nesta tela.</p><a class="btn primary" href="https://suporte.autozap.log.br/chamado" target="_blank" rel="noopener noreferrer">Abrir central de suporte</a></section>`;
   if (adminTab === "plans") return `<section class="panel table-panel"><h2>Planos e quotas</h2><p>Edite plano, limite mensal, postagens usadas e status pelo detalhe do fornecedor.</p>${plansTable()}</section>`;
   return renderAdminOverview();
 }
@@ -1234,9 +1271,9 @@ function renderAdminOverview() {
     <section class="stats-grid five">
       ${statCard("Total de fornecedores", suppliers.length, USE_MOCK ? "Mock local" : "API real")}
       ${statCard("Fornecedores ativos", activeSuppliers, "Operacao liberada")}
-      ${statCard("Campanhas pendentes", USE_MOCK ? posts.filter((post) => ["review", "needs_adjustment"].includes(post.status)).length : "-", USE_MOCK ? "Mock local" : "Sem rota real conectada")}
-      ${statCard("Produtos cadastrados", USE_MOCK ? products.length : "-", USE_MOCK ? "Mock local" : "Sem rota real conectada")}
-      ${statCard("Solicitacoes abertas", USE_MOCK ? helpRequests.filter((request) => request.status !== "Concluida").length : "-", USE_MOCK ? "Mock local" : "Sem rota real conectada")}
+      ${statCard("Campanhas pendentes", posts.filter((post) => ["review", "needs_adjustment"].includes(post.status)).length, "Aguardando equipe")}
+      ${statCard("Produtos cadastrados", products.length, "Catalogo real")}
+      ${statCard("Atendimento", "Suporte", "Central externa de chamados")}
     </section>
     ${adminError ? `<div class="alert">${escapeHTML(adminError)}</div>` : ""}
     ${USE_MOCK ? `
@@ -1299,6 +1336,21 @@ function suppliersTable() {
   `;
 }
 
+let campaignPreviewUrl = null;
+function campaignMediaLink(post) {
+  return `<button class="btn tiny ghost" data-campaign-preview="${escapeHTML(post.id)}">Ver arquivo: ${escapeHTML(post.fileName || 'campanha')}</button>`;
+}
+async function previewCampaign(id) {
+  const response = await fetch(`${API_BASE_URL}/supplier/campaigns/${encodeURIComponent(id)}/media`, {headers:{Authorization:`Bearer ${authToken()}`}});
+  if (!response.ok) throw new Error('Não foi possível abrir o arquivo da campanha.');
+  const blob = await response.blob();
+  if (!/^(image|video)\//.test(blob.type)) throw new Error('Tipo de arquivo indisponível para visualização.');
+  closeModal();
+  campaignPreviewUrl = URL.createObjectURL(blob);
+  const media = blob.type.startsWith('video/') ? `<video src="${campaignPreviewUrl}" controls style="max-width:100%;max-height:65vh"></video>` : `<img src="${campaignPreviewUrl}" alt="Arquivo da campanha" style="max-width:100%;max-height:65vh;object-fit:contain" />`;
+  openModal(`<div class="modal"><h2>Arquivo da campanha</h2>${media}<button type="button" data-action="closeModal">Fechar</button></div>`);
+}
+
 function adminPostsTable(rows = posts) {
   if (!rows.length) return `<div class="empty-state">Nenhuma campanha encontrada.</div>`;
   return `
@@ -1310,13 +1362,12 @@ function adminPostsTable(rows = posts) {
             <tr>
               <td data-label="Fornecedor">${escapeHTML(post.supplier)}</td>
               <td data-label="Campanha">${escapeHTML(post.campaign || post.fileName)}</td>
-              <td data-label="Arquivo">${escapeHTML(post.fileName)}</td>
-              <td data-label="Data desejada">${formatDate(post.desiredDate)} ${escapeHTML(post.desiredTime || "")}</td>
+              <td data-label="Arquivo">${campaignMediaLink(post)}</td>
+              <td data-label="Data desejada">${post.desiredAt ? formatDateTime(post.desiredAt) : formatDate(post.desiredDate) + " " + escapeHTML(post.desiredTime || "")}</td>
               <td data-label="Status">${badge(post.status)}</td>
               <td data-label="Acoes" class="actions">
-                <button class="btn tiny ghost" data-admin-post="${post.id}" data-status="scheduled">Aprovar</button>
+                <button class="btn tiny ghost" data-admin-post="${post.id}" data-status="published">Publicar agora</button>
                 <button class="btn tiny ghost" data-admin-post="${post.id}" data-status="rejected">Rejeitar</button>
-                <button class="btn tiny ghost" data-admin-post="${post.id}" data-status="published">Publicada</button>
                 <button class="btn tiny ghost" data-admin-post="${post.id}" data-status="needs_adjustment">Pedir ajuste</button>
               </td>
             </tr>
@@ -1374,9 +1425,15 @@ function plansTable() {
   `;
 }
 
-function updateCampaignStatus(postId, status) {
+async function updateCampaignStatus(postId, status) {
   if (!USE_MOCK) {
-    showToast("A rota administrativa de campanhas ainda nao esta conectada.", "error");
+    if (status === "published" && !confirm("Publicar esta campanha agora no AutoBook?")) return;
+    try {
+      await apiRequest(`/admin/supplier-campaigns/${encodeURIComponent(postId)}/status`, { method: "POST", body: { status } });
+      await loadAdminData({ force: true });
+      route();
+      showToast("Status da campanha atualizado.");
+    } catch (error) { showToast(error.message || "Nao foi possivel atualizar a campanha.", "error"); }
     return;
   }
   posts = posts.map((item) => item.id === postId ? { ...item, status } : item);
@@ -1517,6 +1574,7 @@ function openModal(html) {
 }
 
 function closeModal() {
+  if (campaignPreviewUrl) { URL.revokeObjectURL(campaignPreviewUrl); campaignPreviewUrl = null; }
   document.querySelector(".modal-backdrop")?.remove();
 }
 
@@ -1600,7 +1658,6 @@ document.addEventListener("click", async (event) => {
     const product = products.find((item) => item.id === target.dataset.toggleProduct);
     try {
       const updated = await updateProduct(target.dataset.toggleProduct, { status: product?.status === "paused" ? "active" : "paused" });
-      await syncProductToStart(updated, supplierUser, "supplier-product-status");
       route();
       showToast("Status do produto atualizado e enviado ao Start.");
     } catch (error) {
@@ -1611,7 +1668,6 @@ document.addEventListener("click", async (event) => {
     try {
       const product = products.find((item) => item.id === target.dataset.removeProduct);
       await apiDeleteSupplierProduct(target.dataset.removeProduct);
-      if (product) await syncProductToStart({ ...product, status: "paused", startVisible: false, stock: 0 }, supplierUser, "supplier-product-remove");
       products = products.filter((item) => item.id !== target.dataset.removeProduct);
       if (USE_MOCK) saveToStorage(STORAGE_PRODUCTS, products);
       route();
@@ -1620,14 +1676,12 @@ document.addEventListener("click", async (event) => {
       showToast(error.message || "Nao foi possivel remover o produto.", "error");
     }
   }
-  if (target.dataset.postStatus) {
-    updateCampaignStatus(target.dataset.postStatus, "published");
-    route();
-    showToast("Campanha marcada como publicada.");
+  if (target.dataset.campaignPreview) {
+    try { await previewCampaign(target.dataset.campaignPreview); } catch(error) { showToast(error.message, "error"); }
+    return;
   }
   if (target.dataset.adminPost) {
-    updateCampaignStatus(target.dataset.adminPost, target.dataset.status);
-    route();
+    await updateCampaignStatus(target.dataset.adminPost, target.dataset.status);
     if (USE_MOCK) showToast("Status da campanha atualizado.");
   }
   if (target.dataset.editSupplier) openSupplierModal(suppliers.find((item) => item.id === target.dataset.editSupplier));
